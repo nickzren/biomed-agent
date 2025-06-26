@@ -1,0 +1,25 @@
+[project]
+name = "biomed-agent"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "aiohttp>=3.9.0",
+    "langchain-openai>=0.1.0",
+    "langchain>=0.2.0",
+    "streamlit>=1.32.0",
+    "typer>=0.12.0",
+    "rich>=13.0.0",
+    "python-dotenv>=1.0.0",
+    "pydantic>=2.0.0",
+    "nest-asyncio>=1.6.0",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["core", "ui"]
+
+[project.scripts]
+biomed-agent = "ui.cli:app"
