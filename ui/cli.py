@@ -7,11 +7,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 import json
 from typing import List, Optional
 import os
-import sys
 from pathlib import Path
-
-# Add parent directory to path for imports
-sys.path.append(str(Path(__file__).parent.parent))
 
 from core import BiomedAgent
 
@@ -114,12 +110,44 @@ def query(
     servers: Optional[List[str]] = typer.Option(
         None, "--server", "-s", help="Specific servers to use"
     ),
-    max_steps: int = typer.Option(10, "--max-steps", help="Maximum reasoning steps")
+    max_steps: int = typer.Option(10, "--max-steps", help="Maximum reasoning steps"),
+    show_steps: bool = typer.Option(False, "--show-steps", help="Show reasoning steps"),
+    output_json: bool = typer.Option(False, "--json", help="Output full response JSON"),
 ):
     """Ask a biomedical question and let the agent find the answer."""
-    asyncio.run(_query(question, servers, max_steps))
+    asyncio.run(_query(question, servers, max_steps, show_steps, output_json))
 
-async def _query(question: str, servers: Optional[List[str]], max_steps: int):
+def _render_response_metadata(response: dict):
+    confidence = response.get("confidence")
+    if confidence:
+        console.print(f"[bold]Confidence:[/bold] {confidence}")
+
+    limitations = response.get("limitations") or []
+    if limitations:
+        console.print("[bold]Limitations:[/bold]")
+        for limitation in limitations:
+            console.print(f"  - {limitation}")
+
+    citations = response.get("citations") or []
+    if citations:
+        console.print("[bold]Citations:[/bold]")
+        for citation in citations:
+            observation_id = citation.get("observation_id", "unknown")
+            tool = citation.get("tool", "unknown-tool")
+            note = citation.get("note", "")
+            if note:
+                console.print(f"  - {observation_id} | {tool} | {note}")
+            else:
+                console.print(f"  - {observation_id} | {tool}")
+
+
+async def _query(
+    question: str,
+    servers: Optional[List[str]],
+    max_steps: int,
+    show_steps: bool,
+    output_json: bool,
+):
     """Async implementation of query."""
     console.print(Panel(f"[bold blue]Question: {question}[/bold blue]", expand=False))
     
@@ -131,13 +159,19 @@ async def _query(question: str, servers: Optional[List[str]], max_steps: int):
             
         with console.status("Thinking and researching..."):
             response = await agent.reason_and_act(question, max_steps)
+
+        if output_json:
+            console.print_json(json.dumps(response, indent=2))
+            return
             
         # Display answer
         console.print("\n[bold green]Answer:[/bold green]")
         console.print(response["answer"])
+        console.print()
+        _render_response_metadata(response)
         
         # Optionally show reasoning steps
-        if console.input("\n[dim]Show reasoning steps? (y/N):[/dim] ").lower() == "y":
+        if show_steps:
             console.print("\n[bold]Reasoning steps:[/bold]")
             for i, step in enumerate(response["steps"]):
                 console.print(f"\n[cyan]Step {i+1}:[/cyan]")
@@ -209,6 +243,8 @@ async def _chat_mode(servers: Optional[List[str]]):
                     
                 # Display the answer after status is done
                 console.print(f"\n[bold green]Agent:[/bold green] {response['answer']}\n")
+                _render_response_metadata(response)
+                console.print()
                 
                 # Ask about reasoning outside of status context
                 if console.input("[dim]Show reasoning? (y/N):[/dim] ").lower() == "y":

@@ -1,7 +1,6 @@
 import asyncio
 import json
 import subprocess
-import os
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,28 +24,28 @@ class MCPClient:
         self.server = server
         self.process: Optional[subprocess.Popen] = None
         self._reader_task: Optional[asyncio.Task] = None
+        self._stderr_task: Optional[asyncio.Task] = None
         self._response_futures: Dict[int, asyncio.Future] = {}
         self._next_id = 1
         self._tools: List[Dict[str, Any]] = []
         
     async def connect(self):
         """Start the MCP server process and establish communication."""
-        # Change to server directory for proper module resolution
-        original_cwd = os.getcwd()
-        os.chdir(self.server.path)
-        
         try:
             self.process = subprocess.Popen(
                 self.server.command,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True
+                text=True,
+                cwd=str(self.server.path)
             )
-            os.chdir(original_cwd)
+            if not self.process.stdin or not self.process.stdout or not self.process.stderr:
+                raise RuntimeError(f"Failed to open stdio streams for {self.server.name}")
             
             # Start reader task
             self._reader_task = asyncio.create_task(self._read_responses())
+            self._stderr_task = asyncio.create_task(self._read_stderr())
             
             # Step 1: Send initialize request
             init_result = await self._send_request("initialize", {
@@ -75,23 +74,29 @@ class MCPClient:
             logger.info(f"Connected to {self.server.name} with {len(self._tools)} tools")
             
         except Exception as e:
-            os.chdir(original_cwd)
             logger.error(f"Connection error: {e}")
-            raise e
+            raise
         
     async def disconnect(self):
         """Disconnect from the MCP server."""
         if self._reader_task:
             self._reader_task.cancel()
-            # Do not await the task here, as it can be on a different event loop
-            # and cause the "Task attached to a different loop" error.
-            # The cancellation will be processed by the task's event loop.
+            self._reader_task = None
+        if self._stderr_task:
+            self._stderr_task.cancel()
+            self._stderr_task = None
                 
         if self.process:
-            self.process.terminate()
-            await asyncio.sleep(0.1)
-            if self.process.poll() is None:
-                self.process.kill()
+            try:
+                self.process.terminate()
+                await asyncio.sleep(0.1)
+                if self.process.poll() is None:
+                    self.process.kill()
+            finally:
+                self.process = None
+                self._fail_pending_futures(
+                    RuntimeError(f"MCP server {self.server.name} disconnected")
+                )
                 
     async def list_tools(self) -> List[Dict[str, Any]]:
         """Return cached list of available tools."""
@@ -120,6 +125,11 @@ class MCPClient:
         
     async def _send_request(self, method: str, params: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         """Send a JSON-RPC request to the server and wait for response."""
+        if not self.process or self.process.poll() is not None:
+            raise RuntimeError(f"MCP server {self.server.name} is not running")
+        if not self.process.stdin:
+            raise RuntimeError(f"MCP server {self.server.name} stdin is unavailable")
+
         request_id = self._next_id
         self._next_id += 1
         
@@ -135,14 +145,18 @@ class MCPClient:
             request["params"] = params
         
         # Create future for response
-        future = asyncio.Future()
+        future = asyncio.get_running_loop().create_future()
         self._response_futures[request_id] = future
         
         # Send request
         request_str = json.dumps(request) + "\n"
         logger.debug(f"Sending request: {request_str.strip()}")
-        self.process.stdin.write(request_str)
-        self.process.stdin.flush()
+        try:
+            self.process.stdin.write(request_str)
+            self.process.stdin.flush()
+        except Exception:
+            self._response_futures.pop(request_id, None)
+            raise
         
         # Wait for response with timeout
         try:
@@ -154,6 +168,11 @@ class MCPClient:
             
     async def _send_notification(self, method: str, params: Optional[Dict[str, Any]] = None):
         """Send a JSON-RPC notification (no response expected)."""
+        if not self.process or self.process.poll() is not None:
+            raise RuntimeError(f"MCP server {self.server.name} is not running")
+        if not self.process.stdin:
+            raise RuntimeError(f"MCP server {self.server.name} stdin is unavailable")
+
         # Build notification (no id field)
         notification = {
             "jsonrpc": "2.0",
@@ -173,7 +192,9 @@ class MCPClient:
         """Read responses from the server stdout."""
         while True:
             try:
-                line = await asyncio.get_event_loop().run_in_executor(
+                if not self.process or not self.process.stdout:
+                    break
+                line = await asyncio.get_running_loop().run_in_executor(
                     None, self.process.stdout.readline
                 )
                 if not line:
@@ -196,10 +217,10 @@ class MCPClient:
                     
                     # Only process responses with an ID (not notifications)
                     request_id = response.get("id")
-                    if request_id and request_id in self._response_futures:
+                    if request_id is not None and request_id in self._response_futures:
                         future = self._response_futures.pop(request_id)
                         if "error" in response:
-                            future.set_exception(Exception(response["error"]))
+                            future.set_exception(RuntimeError(str(response["error"])))
                         else:
                             future.set_result(response.get("result", {}))
                 except json.JSONDecodeError as e:
@@ -209,3 +230,41 @@ class MCPClient:
                 break
             except Exception as e:
                 logger.error(f"Error reading response: {e}")
+                break
+
+        self._fail_pending_futures(
+            RuntimeError(f"MCP server {self.server.name} closed before responding")
+        )
+
+    async def _read_stderr(self):
+        """Read stderr from the server process and log it."""
+        while True:
+            try:
+                if not self.process or not self.process.stderr:
+                    break
+                line = await asyncio.get_running_loop().run_in_executor(
+                    None, self.process.stderr.readline
+                )
+                if not line:
+                    break
+                line = line.strip()
+                if line:
+                    lowered = line.lower()
+                    if "virtual_env=" in lowered and "does not match the project environment path" in lowered:
+                        logger.debug("stderr from %s: %s", self.server.name, line)
+                        continue
+                    if any(token in lowered for token in ("error", "exception", "traceback", "warning")):
+                        logger.warning("stderr from %s: %s", self.server.name, line)
+                    else:
+                        logger.debug("stderr from %s: %s", self.server.name, line)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("Error reading stderr from %s: %s", self.server.name, e)
+                break
+
+    def _fail_pending_futures(self, error: Exception):
+        for request_id, future in list(self._response_futures.items()):
+            if not future.done():
+                future.set_exception(error)
+            self._response_futures.pop(request_id, None)

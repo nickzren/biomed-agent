@@ -1,21 +1,21 @@
 import streamlit as st
 import asyncio
 import json
-import sys
+import logging
 from pathlib import Path
 import nest_asyncio
 from datetime import datetime
 import time
 import os
+from html import escape
 
 # Allow nested event loops in Streamlit
 nest_asyncio.apply()
 
-# Add parent directory to path
-sys.path.append(str(Path(__file__).parent.parent))
-
 from core import BiomedAgent
 from core.agent import MCP_SERVERS
+
+logger = logging.getLogger(__name__)
 
 # Page config
 st.set_page_config(
@@ -353,6 +353,31 @@ def run_async(coro):
         asyncio.set_event_loop(loop)
     return loop.run_until_complete(coro)
 
+
+def render_response_metadata(response: dict):
+    """Render confidence, citations, and limitations for a response."""
+    confidence = response.get("confidence")
+    if confidence:
+        st.caption(f"Confidence: {confidence}")
+
+    citations = response.get("citations") or []
+    if citations:
+        with st.expander("Sources"):
+            for citation in citations:
+                observation_id = citation.get("observation_id", "unknown")
+                tool = citation.get("tool", "unknown-tool")
+                note = citation.get("note", "")
+                if note:
+                    st.markdown(f"- `{observation_id}` | `{tool}` | {note}")
+                else:
+                    st.markdown(f"- `{observation_id}` | `{tool}`")
+
+    limitations = response.get("limitations") or []
+    if limitations:
+        with st.expander("Limitations"):
+            for limitation in limitations:
+                st.markdown(f"- {limitation}")
+
 # Initialize session state
 if 'agent' not in st.session_state:
     st.session_state.agent = None
@@ -385,11 +410,12 @@ with st.sidebar:
         
         status_class = "status-available" if is_available else "status-unavailable"
         status_text = "Available" if is_available else "Not Found"
+        safe_description = escape(config["description"])
         
         st.markdown(f"""
         <div class="data-source-item">
             <div class="data-source-header">
-                <span class="data-source-desc">{config["description"]}</span>
+                <span class="data-source-desc">{safe_description}</span>
                 <span class="data-source-status {status_class}">{status_text}</span>
             </div>
         </div>
@@ -443,7 +469,7 @@ with st.sidebar:
                 with st.spinner("Disconnecting..."):
                     run_async(agent_to_disconnect.disconnect())
             except Exception as e:
-                print(f"Error during disconnect: {e}")
+                logger.error("Error during disconnect: %s", e)
                 st.warning(f"Could not cleanly disconnect from servers: {e}")
         
         st.rerun()
@@ -452,6 +478,9 @@ with st.sidebar:
 if st.session_state.connected:
     st.markdown("<h1><i class='bi bi-robot'></i> Biomedical Agent</h1>", unsafe_allow_html=True)
     st.markdown("Query multiple biomedical databases with an AI-powered research assistant")
+    st.info(
+        "Research-use assistant: provides general biomedical information, not personalized medical diagnosis or treatment advice."
+    )
     
     tab1, tab2, tab3, tab4 = st.tabs([
         "💬 Chat",
@@ -481,6 +510,22 @@ if st.session_state.connected:
         for msg in st.session_state.messages:
             with st.chat_message(msg["role"]):
                 st.write(msg["content"])
+                if msg.get("confidence"):
+                    st.caption(f"Confidence: {msg['confidence']}")
+                if msg.get("citations"):
+                    with st.expander("Sources"):
+                        for citation in msg["citations"]:
+                            observation_id = citation.get("observation_id", "unknown")
+                            tool = citation.get("tool", "unknown-tool")
+                            note = citation.get("note", "")
+                            if note:
+                                st.markdown(f"- `{observation_id}` | `{tool}` | {note}")
+                            else:
+                                st.markdown(f"- `{observation_id}` | `{tool}`")
+                if msg.get("limitations"):
+                    with st.expander("Limitations"):
+                        for limitation in msg["limitations"]:
+                            st.markdown(f"- {limitation}")
                 if "reasoning_steps" in msg:
                     with st.expander("View Reasoning"):
                         for i, step in enumerate(msg["reasoning_steps"]):
@@ -505,16 +550,22 @@ if st.session_state.connected:
                         response = run_async(st.session_state.agent.reason_and_act(prompt))
                         answer = response["answer"]
                         st.write(answer)
+                        render_response_metadata(response)
                         
                         msg_data = {
                             "role": "assistant",
                             "content": answer,
-                            "reasoning_steps": response["steps"]
+                            "reasoning_steps": response["steps"],
+                            "confidence": response.get("confidence"),
+                            "citations": response.get("citations", []),
+                            "limitations": response.get("limitations", []),
                         }
                         st.session_state.messages.append(msg_data)
                         st.session_state.query_history.append({
                             "query": prompt, "answer": answer, 
-                            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "confidence": response.get("confidence"),
+                            "citations_count": len(response.get("citations", [])),
                         })
                     except Exception as e:
                         st.error(f"Error: {str(e)}")
@@ -542,6 +593,7 @@ if st.session_state.connected:
                     st.success(f"Completed in {elapsed:.2f}s")
                     st.markdown("##### Answer")
                     st.info(response["answer"])
+                    render_response_metadata(response)
                     
                     if show_details and "steps" in response:
                         st.markdown("##### Reasoning Steps")
@@ -560,7 +612,9 @@ if st.session_state.connected:
                     st.session_state.query_history.append({
                         "query": query, "answer": response["answer"], 
                         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 
-                        "time": elapsed
+                        "time": elapsed,
+                        "confidence": response.get("confidence"),
+                        "citations_count": len(response.get("citations", [])),
                     })
                 except Exception as e:
                     st.error(f"Error: {str(e)}")
@@ -604,6 +658,10 @@ if st.session_state.connected:
                 with st.expander(f"{item['timestamp']} - {item['query'][:70]}"):
                     st.write(f"**Query:** {item['query']}")
                     st.info(f"**Answer:** {item['answer']}")
+                    if item.get("confidence"):
+                        st.caption(f"Confidence: {item['confidence']}")
+                    if item.get("citations_count") is not None:
+                        st.caption(f"Sources used: {item['citations_count']}")
                     if 'time' in item:
                         st.caption(f"Time taken: {item['time']:.2f}s")
         else:
