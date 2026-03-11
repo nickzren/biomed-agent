@@ -1,7 +1,6 @@
 import streamlit as st
 import asyncio
 import json
-import logging
 from pathlib import Path
 import nest_asyncio
 from datetime import datetime
@@ -15,7 +14,17 @@ nest_asyncio.apply()
 from core import BiomedAgent
 from core.agent import MCP_SERVERS
 
-logger = logging.getLogger(__name__)
+
+def get_query_timeout_seconds() -> int:
+    raw_value = os.getenv("BIOMED_AGENT_QUERY_TIMEOUT_SECONDS", "90")
+    try:
+        timeout = int(raw_value)
+    except ValueError:
+        timeout = 90
+    return max(timeout, 15)
+
+
+QUERY_TIMEOUT_SECONDS = get_query_timeout_seconds()
 
 # Page config
 st.set_page_config(
@@ -346,21 +355,48 @@ st.markdown("""
 # Helper function to run async code
 def run_async(coro):
     """Run async function in Streamlit context"""
+    loop = asyncio.new_event_loop()
     try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-    return loop.run_until_complete(coro)
+        return loop.run_until_complete(coro)
+    finally:
+        loop.run_until_complete(loop.shutdown_asyncgens())
+        loop.close()
+        asyncio.set_event_loop(None)
 
+
+async def fetch_connection_snapshot(server_names: list[str]):
+    agent = BiomedAgent(server_names)
+    await agent.connect()
+    try:
+        return {
+            "connected_servers": sorted(agent.clients.keys()),
+            "tools_by_server": agent.list_all_tools(),
+        }
+    finally:
+        await agent.disconnect()
+
+
+async def run_query_workflow(server_names: list[str], query: str, max_steps: int = 10):
+    agent = BiomedAgent(server_names)
+    await agent.connect()
+    try:
+        response = await asyncio.wait_for(
+            agent.reason_and_act(query, max_steps),
+            timeout=QUERY_TIMEOUT_SECONDS,
+        )
+        return response
+    finally:
+        await agent.disconnect()
 
 def render_response_metadata(response: dict):
     """Render confidence, citations, and limitations for a response."""
     confidence = response.get("confidence")
+    citations = response.get("citations") or []
+    limitations = response.get("limitations") or []
     if confidence:
         st.caption(f"Confidence: {confidence}")
 
-    citations = response.get("citations") or []
     if citations:
         with st.expander("Sources"):
             for citation in citations:
@@ -372,18 +408,20 @@ def render_response_metadata(response: dict):
                 else:
                     st.markdown(f"- `{observation_id}` | `{tool}`")
 
-    limitations = response.get("limitations") or []
     if limitations:
         with st.expander("Limitations"):
             for limitation in limitations:
                 st.markdown(f"- {limitation}")
 
 # Initialize session state
-if 'agent' not in st.session_state:
-    st.session_state.agent = None
+if 'connected' not in st.session_state:
     st.session_state.connected = False
+    st.session_state.selected_servers = []
+    st.session_state.connected_servers = []
+    st.session_state.tools_by_server = {}
     st.session_state.messages = []
     st.session_state.query_history = []
+    st.session_state.pending_prompt = None
 
 # --- SIDEBAR ---
 with st.sidebar:
@@ -448,30 +486,23 @@ with st.sidebar:
     if connect_btn:
         with st.spinner("Connecting to servers..."):
             try:
-                agent = BiomedAgent(selected_servers)
-                run_async(agent.connect())
-                st.session_state.agent = agent
-                st.session_state.connected = True
+                snapshot = run_async(fetch_connection_snapshot(selected_servers))
+                st.session_state.selected_servers = list(selected_servers)
+                st.session_state.connected_servers = snapshot["connected_servers"]
+                st.session_state.tools_by_server = snapshot["tools_by_server"]
+                st.session_state.connected = bool(snapshot["connected_servers"])
                 st.rerun()
             except Exception as e:
                 st.error(f"Connection failed: {str(e)}")
     
     if disconnect_btn:
-        agent_to_disconnect = st.session_state.get("agent")
-        
         st.session_state.connected = False
-        st.session_state.agent = None
+        st.session_state.selected_servers = []
+        st.session_state.connected_servers = []
+        st.session_state.tools_by_server = {}
         st.session_state.messages = []
         st.session_state.query_history = []
-        
-        if agent_to_disconnect:
-            try:
-                with st.spinner("Disconnecting..."):
-                    run_async(agent_to_disconnect.disconnect())
-            except Exception as e:
-                logger.error("Error during disconnect: %s", e)
-                st.warning(f"Could not cleanly disconnect from servers: {e}")
-        
+        st.session_state.pending_prompt = None
         st.rerun()
 
 # --- MAIN CONTENT ---
@@ -503,29 +534,15 @@ if st.session_state.connected:
             cols = st.columns(2)
             for idx, example in enumerate(examples):
                 if cols[idx % 2].button(example, key=f"ex_{idx}", use_container_width=True):
-                    st.session_state.messages.append({"role": "user", "content": example})
+                    st.session_state.pending_prompt = example
                     st.rerun()
             st.markdown("---")
         
         for msg in st.session_state.messages:
             with st.chat_message(msg["role"]):
                 st.write(msg["content"])
-                if msg.get("confidence"):
-                    st.caption(f"Confidence: {msg['confidence']}")
-                if msg.get("citations"):
-                    with st.expander("Sources"):
-                        for citation in msg["citations"]:
-                            observation_id = citation.get("observation_id", "unknown")
-                            tool = citation.get("tool", "unknown-tool")
-                            note = citation.get("note", "")
-                            if note:
-                                st.markdown(f"- `{observation_id}` | `{tool}` | {note}")
-                            else:
-                                st.markdown(f"- `{observation_id}` | `{tool}`")
-                if msg.get("limitations"):
-                    with st.expander("Limitations"):
-                        for limitation in msg["limitations"]:
-                            st.markdown(f"- {limitation}")
+                if msg["role"] == "assistant":
+                    render_response_metadata(msg)
                 if "reasoning_steps" in msg:
                     with st.expander("View Reasoning"):
                         for i, step in enumerate(msg["reasoning_steps"]):
@@ -539,7 +556,12 @@ if st.session_state.connected:
                                 st.markdown(f"**Step {i+1}: Observation**")
                                 st.json(step["observation"])
         
-        if prompt := st.chat_input("Ask a question..."):
+        prompt = st.chat_input("Ask a question...")
+        if not prompt and st.session_state.pending_prompt:
+            prompt = st.session_state.pending_prompt
+            st.session_state.pending_prompt = None
+
+        if prompt:
             st.session_state.messages.append({"role": "user", "content": prompt})
             with st.chat_message("user"):
                 st.write(prompt)
@@ -547,7 +569,9 @@ if st.session_state.connected:
             with st.chat_message("assistant"):
                 with st.spinner("Researching..."):
                     try:
-                        response = run_async(st.session_state.agent.reason_and_act(prompt))
+                        response = run_async(
+                            run_query_workflow(st.session_state.selected_servers, prompt)
+                        )
                         answer = response["answer"]
                         st.write(answer)
                         render_response_metadata(response)
@@ -567,12 +591,18 @@ if st.session_state.connected:
                             "confidence": response.get("confidence"),
                             "citations_count": len(response.get("citations", [])),
                         })
+                    except TimeoutError:
+                        st.error(
+                            f"Query timed out after {QUERY_TIMEOUT_SECONDS}s. "
+                            "Try fewer servers or a narrower question."
+                        )
                     except Exception as e:
                         st.error(f"Error: {str(e)}")
         
         if st.session_state.messages:
             if st.button("Clear Chat", key="clear_chat"):
                 st.session_state.messages = []
+                st.session_state.pending_prompt = None
                 st.rerun()
     
     with tab2:
@@ -587,7 +617,9 @@ if st.session_state.connected:
             with st.spinner("Processing..."):
                 try:
                     start_time = time.time()
-                    response = run_async(st.session_state.agent.reason_and_act(query, max_steps))
+                    response = run_async(
+                        run_query_workflow(st.session_state.selected_servers, query, max_steps)
+                    )
                     elapsed = time.time() - start_time
                     
                     st.success(f"Completed in {elapsed:.2f}s")
@@ -616,12 +648,17 @@ if st.session_state.connected:
                         "confidence": response.get("confidence"),
                         "citations_count": len(response.get("citations", [])),
                     })
+                except TimeoutError:
+                    st.error(
+                        f"Query timed out after {QUERY_TIMEOUT_SECONDS}s. "
+                        "Try fewer servers or a narrower question."
+                    )
                 except Exception as e:
                     st.error(f"Error: {str(e)}")
 
     with tab3:
         st.markdown("#### Tools Explorer")
-        tools = st.session_state.agent.list_all_tools()
+        tools = st.session_state.tools_by_server
         total_tools = sum(len(t) for t in tools.values())
         
         c1, c2, c3 = st.columns(3)
@@ -658,12 +695,12 @@ if st.session_state.connected:
                 with st.expander(f"{item['timestamp']} - {item['query'][:70]}"):
                     st.write(f"**Query:** {item['query']}")
                     st.info(f"**Answer:** {item['answer']}")
+                    if 'time' in item:
+                        st.caption(f"Time taken: {item['time']:.2f}s")
                     if item.get("confidence"):
                         st.caption(f"Confidence: {item['confidence']}")
                     if item.get("citations_count") is not None:
                         st.caption(f"Sources used: {item['citations_count']}")
-                    if 'time' in item:
-                        st.caption(f"Time taken: {item['time']:.2f}s")
         else:
             st.info("No queries have been made in this session.")
 
