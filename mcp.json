@@ -1,0 +1,34 @@
+{
+  "mcpServers": {
+    "opentargets": {
+      "transport": "stdio",
+      "command": "uv",
+      "args": ["run", "python", "-m", "opentargets_mcp.server"],
+      "cwd": "../opentargets-mcp"
+    },
+    "monarch": {
+      "transport": "stdio",
+      "command": "uv",
+      "args": ["run", "python", "-m", "monarch_mcp.server"],
+      "cwd": "../monarch-mcp"
+    },
+    "mygene": {
+      "transport": "stdio",
+      "command": "uv",
+      "args": ["run", "python", "-m", "mygene_mcp.server"],
+      "cwd": "../mygene-mcp"
+    },
+    "mychem": {
+      "transport": "stdio",
+      "command": "uv",
+      "args": ["run", "python", "-m", "mychem_mcp.server"],
+      "cwd": "../mychem-mcp"
+    },
+    "mydisease": {
+      "transport": "stdio",
+      "command": "uv",
+      "args": ["run", "python", "-m", "mydisease_mcp.server"],
+      "cwd": "../mydisease-mcp"
+    }
+  }
+}
