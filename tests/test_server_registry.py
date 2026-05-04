@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from core.servers import (
+from biomed_agent.servers import (
     MCP_SERVERS,
     build_server,
     find_tools_by_capability,

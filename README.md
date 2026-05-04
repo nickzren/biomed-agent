@@ -22,7 +22,7 @@ flowchart TB
         skill["skills/biomed-research<br/>research workflow"]
         config["mcp.json<br/>server registration"]
         diagnostics["Diagnostics CLI<br/>list, inspect, call, doctor"]
-        client["core/servers.py + core/mcp_client.py<br/>mechanical MCP access"]
+        client["biomed_agent/servers.py + biomed_agent/mcp_client.py<br/>mechanical MCP access"]
     end
 
     runtime --> contract
@@ -56,11 +56,11 @@ uv sync
 ## Diagnostics
 
 ```bash
-uv run python -m ui.cli list-servers
-uv run python -m ui.cli list-tools
-uv run python -m ui.cli list-tools --server opentargets
-uv run python -m ui.cli call-tool opentargets.search_entities '{"query_string":"BRAF","entity_names":["target"]}'
-uv run python -m ui.cli doctor
+uv run python -m biomed_agent.cli list-servers
+uv run python -m biomed_agent.cli list-tools
+uv run python -m biomed_agent.cli list-tools --server opentargets
+uv run python -m biomed_agent.cli call-tool opentargets.search_entities '{"query_string":"BRAF","entity_names":["target"]}'
+uv run python -m biomed_agent.cli doctor
 ```
 
 ## Tests

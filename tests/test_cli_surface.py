@@ -1,6 +1,6 @@
 from typer.testing import CliRunner
 
-from ui.cli import app
+from biomed_agent.cli import app
 
 
 runner = CliRunner()

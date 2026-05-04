@@ -61,10 +61,10 @@ The Python code is a mechanical MCP diagnostics utility only:
 
 ```bash
 uv sync
-uv run python -m ui.cli list-servers
-uv run python -m ui.cli list-tools --server opentargets
-uv run python -m ui.cli call-tool opentargets.search_entities '{"query_string":"BRAF","entity_names":["target"]}'
-uv run python -m ui.cli doctor
+uv run python -m biomed_agent.cli list-servers
+uv run python -m biomed_agent.cli list-tools --server opentargets
+uv run python -m biomed_agent.cli call-tool opentargets.search_entities '{"query_string":"BRAF","entity_names":["target"]}'
+uv run python -m biomed_agent.cli doctor
 uv run pytest tests/ -q
 ```
 
@@ -90,9 +90,9 @@ Override with `OPENTARGETS_MCP_PATH`, `MONARCH_MCP_PATH`, `MYGENE_MCP_PATH`, `MY
 - `CLAUDE.md`: thin pointer for Claude Code.
 - `skills/biomed-research/SKILL.md`: biomedical research workflow.
 - `mcp.json`: example MCP registration.
-- `core/servers.py`: MCP server registry and mechanical helpers.
-- `core/mcp_client.py`: stdio JSON-RPC MCP client used by diagnostics.
-- `ui/cli.py`: diagnostics CLI only.
+- `biomed_agent/servers.py`: MCP server registry and mechanical helpers.
+- `biomed_agent/mcp_client.py`: stdio JSON-RPC MCP client used by diagnostics.
+- `biomed_agent/cli.py`: diagnostics CLI only.
 - `tests/`: contract and diagnostics tests.
 
 ## Editing Rules

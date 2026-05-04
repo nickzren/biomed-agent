@@ -6,8 +6,8 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from core.mcp_client import MCPClient
-from core.servers import (
+from .mcp_client import MCPClient
+from .servers import (
     MCP_SERVERS,
     build_server,
     find_tools_by_capability,
