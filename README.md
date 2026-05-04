@@ -11,6 +11,30 @@ This repo no longer owns an LLM reasoning loop or Streamlit UI. Codex or Claude 
 - The cross-server research contract for agents.
 - Example MCP registration in [mcp.json](mcp.json).
 
+## Architecture
+
+```mermaid
+flowchart TB
+    user["User"] --> runtime["Codex / Claude Code"]
+
+    subgraph repo["biomed-agent"]
+        contract["AGENTS.md<br/>canonical contract"]
+        skill["skills/biomed-research<br/>research workflow"]
+        config["mcp.json<br/>server registration"]
+        diagnostics["Diagnostics CLI<br/>list, inspect, call, doctor"]
+        client["core/servers.py + core/mcp_client.py<br/>mechanical MCP access"]
+    end
+
+    runtime --> contract
+    contract --> skill
+    contract --> config
+    diagnostics --> client
+
+    config --> servers["5 biomedical MCP servers"]
+    client --> servers
+    servers --> sources["OpenTargets, Monarch, MyGene,<br/>MyChem, MyDisease data"]
+```
+
 ## MCP Servers
 
 The default setup expects sibling repos:
