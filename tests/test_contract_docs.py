@@ -3,18 +3,15 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-TAGLINE = (
-    "Agent-native biomedical research workspace for Claude Code and Codex, "
-    "backed by MCP tools instead of app-owned LLM APIs."
-)
+ABOUT_LINE = "Connecting AI to biomedical data"
 
 
 def test_positioning_tagline_is_canonical():
     readme = (ROOT / "README.md").read_text()
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
 
-    assert readme.startswith(f"# Biomedical Agent Workspace\n\n{TAGLINE}\n")
-    assert pyproject["project"]["description"] == TAGLINE
+    assert readme.startswith(f"# Biomedical Agent Workspace\n\n{ABOUT_LINE}.\n")
+    assert pyproject["project"]["description"] == ABOUT_LINE
 
 
 def test_agent_guide_points_to_skill_and_mcp_config():

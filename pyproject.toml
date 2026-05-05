@@ -1,7 +1,7 @@
 [project]
 name = "biomed-agent"
 version = "0.2.0"
-description = "Agent-native biomedical research workspace for Claude Code and Codex, backed by MCP tools instead of app-owned LLM APIs."
+description = "Connecting AI to biomedical data"
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
 dependencies = [

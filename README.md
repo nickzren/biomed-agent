@@ -1,10 +1,10 @@
 # Biomedical Agent Workspace
 
-Agent-native biomedical research workspace for Claude Code and Codex, backed by MCP tools instead of app-owned LLM APIs.
+Connecting AI to biomedical data.
 
-This repo no longer owns an LLM reasoning loop or Streamlit UI. Codex or Claude Code should call the five biomedical MCP servers directly, guided by [AGENTS.md](AGENTS.md) and [skills/biomed-research/SKILL.md](skills/biomed-research/SKILL.md).
+`biomed-agent` is an MCP-backed biomedical research workspace for Claude Code, Codex, and other coding agents. It provides server registration, diagnostics, and source-backed routing guidance across OpenTargets, Monarch, MyGene, MyChem, and MyDisease.
 
-## What Stays Here
+## What It Provides
 
 - MCP server registry and local path handling.
 - A tiny diagnostics CLI for server/tool inspection.
