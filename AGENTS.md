@@ -61,14 +61,17 @@ The Python code is a mechanical MCP diagnostics utility only:
 
 ```bash
 uv sync
-uv run python -m biomed_agent.cli list-servers
-uv run python -m biomed_agent.cli list-tools --server opentargets
-uv run python -m biomed_agent.cli call-tool opentargets.search_entities '{"query_string":"BRAF","entity_names":["target"]}'
-uv run python -m biomed_agent.cli doctor
+uv run biomed-agent list-servers
+uv run biomed-agent list-servers --json
+uv run biomed-agent list-tools --server opentargets
+uv run biomed-agent call-tool opentargets.search_entities '{"query_string":"BRAF","entity_names":["target"]}'
+uv run biomed-agent doctor
+uv run biomed-agent doctor --json
+uv run biomed-agent init --runtime codex --print
 uv run pytest tests/ -q
 ```
 
-Allowed CLI commands are `list-servers`, `list-tools`, `call-tool`, and `doctor`. Do not add `query`, `chat`, synthesis, LangChain, OpenAI SDK usage, or app-owned LLM calls.
+Allowed CLI commands are `list-servers`, `list-tools`, `call-tool`, `doctor`, and print-only `init`. Do not add `query`, `chat`, synthesis, LangChain, OpenAI SDK usage, or app-owned LLM calls.
 
 ## MCP Server Paths
 

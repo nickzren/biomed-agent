@@ -1,5 +1,6 @@
 import asyncio
 import json
+from pathlib import Path
 from typing import Any, Optional
 
 import typer
@@ -17,13 +18,23 @@ from .servers import (
     split_tool_id,
 )
 
-app = typer.Typer(help="Biomedical MCP diagnostics CLI")
+app = typer.Typer(help="Biomedical MCP workspace CLI")
 console = Console()
+SCHEMA_VERSION = 1
+SUPPORTED_INIT_RUNTIMES = {"codex", "claude", "cursor"}
 
 
 @app.command("list-servers")
-def list_servers() -> None:
+def list_servers(
+    json_output: bool = typer.Option(
+        False, "--json", help="Print stable machine-readable JSON"
+    ),
+) -> None:
     """List configured MCP servers and local path status."""
+    if json_output:
+        _print_json(build_list_servers_payload())
+        return
+
     table = Table(title="Biomedical MCP Servers", show_header=True, expand=False)
     table.add_column("Server", style="cyan", no_wrap=True)
     table.add_column("Status", style="white", no_wrap=True)
@@ -53,15 +64,23 @@ def list_tools(
     capability: Optional[str] = typer.Option(
         None, "--capability", "-c", help="Filter tools by capability"
     ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Print stable machine-readable JSON"
+    ),
 ) -> None:
     """List tools exposed by one or more MCP servers."""
-    asyncio.run(_list_tools(servers, capability))
+    asyncio.run(_list_tools(servers, capability, json_output))
 
 
 async def _list_tools(
     servers: Optional[list[str]],
     capability: Optional[str],
+    json_output: bool,
 ) -> None:
+    if json_output:
+        _print_json(await build_list_tools_payload(servers, capability))
+        return
+
     clients: list[MCPClient] = []
     try:
         registry = await _connect_and_register(servers, clients)
@@ -136,12 +155,19 @@ def doctor(
     servers: Optional[list[str]] = typer.Option(
         None, "--server", "-s", help="Specific server to check"
     ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Print stable machine-readable JSON"
+    ),
 ) -> None:
     """Check MCP server paths and tool-list connectivity."""
-    asyncio.run(_doctor(servers))
+    asyncio.run(_doctor(servers, json_output))
 
 
-async def _doctor(servers: Optional[list[str]]) -> None:
+async def _doctor(servers: Optional[list[str]], json_output: bool) -> None:
+    if json_output:
+        _print_json(await build_doctor_payload(servers))
+        return
+
     names = selected_server_names(servers)
     table = Table(title="Biomedical MCP Doctor", show_header=True)
     table.add_column("Server", style="cyan")
@@ -166,6 +192,32 @@ async def _doctor(servers: Optional[list[str]]) -> None:
             await client.disconnect()
 
     console.print(table)
+
+
+@app.command("init")
+def init(
+    runtime: str = typer.Option(
+        ..., "--runtime", "-r", help="Runtime to initialize: codex, claude, or cursor"
+    ),
+    print_config: bool = typer.Option(
+        False, "--print", help="Print config and guidance without writing files"
+    ),
+    mcp_base: str = typer.Option(
+        "../",
+        "--mcp-base",
+        help="Base directory containing sibling MCP repos",
+    ),
+) -> None:
+    """Print MCP config and agent guidance for a coding-agent runtime."""
+    runtime = runtime.lower()
+    if runtime not in SUPPORTED_INIT_RUNTIMES:
+        raise typer.BadParameter(
+            "Runtime must be one of: " + ", ".join(sorted(SUPPORTED_INIT_RUNTIMES))
+        )
+    if not print_config:
+        raise typer.BadParameter("init is read-only; pass --print to print config")
+
+    _print_json(build_init_payload(runtime, mcp_base))
 
 
 async def _connect_and_register(
@@ -202,6 +254,243 @@ async def _disconnect_all(clients: list[MCPClient]) -> None:
     await asyncio.gather(
         *(client.disconnect() for client in clients),
         return_exceptions=True,
+    )
+
+
+def _print_json(payload: dict[str, Any]) -> None:
+    console.print_json(json.dumps(payload, indent=2, default=str))
+
+
+def build_list_servers_payload() -> dict[str, Any]:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "servers": [
+            _server_config_payload(server_name)
+            for server_name in selected_server_names(None)
+        ],
+    }
+
+
+def _server_config_payload(server_name: str) -> dict[str, Any]:
+    config = MCP_SERVERS[server_name]
+    path = resolve_server_path(server_name)
+    return {
+        "name": server_name,
+        "description": config.description,
+        "module": config.module,
+        "path": str(path),
+        "exists": path.exists(),
+        "status": "found" if path.exists() else "missing",
+        "capabilities": list(config.capabilities),
+    }
+
+
+async def build_list_tools_payload(
+    servers: Optional[list[str]],
+    capability: Optional[str],
+) -> dict[str, Any]:
+    names = selected_server_names(servers)
+    payload: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "servers": [],
+        "total_tools": 0,
+    }
+    if capability:
+        payload["capability"] = capability
+        payload["tools"] = []
+
+    for server_name in names:
+        server = build_server(server_name)
+        server_payload: dict[str, Any] = {
+            "name": server_name,
+            "path": str(server.path),
+            "status": "missing",
+            "tool_count": 0,
+            "tools": [],
+        }
+        if not server.path.exists():
+            payload["servers"].append(server_payload)
+            continue
+
+        client = MCPClient(server)
+        try:
+            await client.connect()
+            tools = [_tool_payload(server_name, tool) for tool in await client.list_tools()]
+            if capability:
+                tools = [
+                    tool for tool in tools if _tool_matches_capability(tool, capability)
+                ]
+            server_payload.update(
+                {
+                    "status": "ok",
+                    "tool_count": len(tools),
+                    "tools": tools,
+                }
+            )
+            payload["total_tools"] += len(tools)
+            if capability:
+                payload["tools"].extend(tools)
+        except Exception as exc:
+            server_payload.update({"status": "error", "error": str(exc)})
+        finally:
+            await client.disconnect()
+        payload["servers"].append(server_payload)
+
+    return payload
+
+
+def _tool_payload(server_name: str, tool: dict[str, Any]) -> dict[str, Any]:
+    tool_name = str(tool.get("name", ""))
+    return {
+        "id": f"{server_name}.{tool_name}" if tool_name else server_name,
+        "server": server_name,
+        "name": tool_name,
+        "description": tool.get("description", ""),
+    }
+
+
+def _tool_matches_capability(tool: dict[str, Any], capability: str) -> bool:
+    needle = capability.lower()
+    server_name = str(tool["server"])
+    config = MCP_SERVERS[server_name]
+    haystack = " ".join(
+        [
+            str(tool.get("id", "")),
+            str(tool.get("name", "")),
+            str(tool.get("description", "")),
+            " ".join(config.capabilities),
+        ]
+    ).lower()
+    return needle in haystack
+
+
+async def build_doctor_payload(servers: Optional[list[str]]) -> dict[str, Any]:
+    server_payloads = []
+    for server_name in selected_server_names(servers):
+        server = build_server(server_name)
+        item: dict[str, Any] = {
+            "name": server_name,
+            "path": str(server.path),
+            "status": "missing",
+            "tool_count": 0,
+        }
+        if not server.path.exists():
+            server_payloads.append(item)
+            continue
+
+        client = MCPClient(server)
+        try:
+            await client.connect()
+            tools = await client.list_tools()
+            item.update({"status": "ok", "tool_count": len(tools)})
+        except Exception as exc:
+            item.update({"status": "error", "error": str(exc)})
+        finally:
+            await client.disconnect()
+        server_payloads.append(item)
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "servers": server_payloads,
+        "total_tools": sum(item["tool_count"] for item in server_payloads),
+    }
+
+
+def build_init_payload(runtime: str, mcp_base: str) -> dict[str, Any]:
+    mcp_config, server_paths = _build_mcp_config(mcp_base)
+    payload: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "runtime": runtime,
+        "mode": "print-only",
+        "writes_files": False,
+        "mcp_base": mcp_base,
+        "server_paths": server_paths,
+        "mcp_config": mcp_config,
+        "agent_guidance": _agent_guidance(runtime),
+    }
+    if runtime == "codex":
+        payload["codex_config_toml"] = _build_codex_toml(mcp_config)
+    elif runtime == "cursor":
+        payload["cursor_agent_instructions"] = _cursor_agent_instructions()
+    return payload
+
+
+def _build_mcp_config(mcp_base: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    base = Path(mcp_base)
+    exists_base = base.expanduser()
+    mcp_servers = {}
+    server_paths = []
+    for server_name, config in MCP_SERVERS.items():
+        repo_dir = config.default_path.name
+        cwd = base / repo_dir
+        exists_path = exists_base / repo_dir
+        server_config = {
+            "transport": "stdio",
+            "command": "uv",
+            "args": ["run", "python", "-m", config.module],
+            "cwd": cwd.as_posix(),
+        }
+        mcp_servers[server_name] = server_config
+        server_paths.append(
+            {
+                "name": server_name,
+                "cwd": cwd.as_posix(),
+                "exists": exists_path.exists(),
+                "status": "found" if exists_path.exists() else "missing",
+            }
+        )
+    return {"mcpServers": mcp_servers}, server_paths
+
+
+def _build_codex_toml(mcp_config: dict[str, Any]) -> str:
+    lines = []
+    for server_name, server_config in mcp_config["mcpServers"].items():
+        lines.append(f"[mcp_servers.{server_name}]")
+        lines.append(f"command = {json.dumps(server_config['command'])}")
+        lines.append(f"args = {json.dumps(server_config['args'])}")
+        lines.append(f"cwd = {json.dumps(server_config['cwd'])}")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+def _agent_guidance(runtime: str) -> dict[str, Any]:
+    return {
+        "contract": "Use AGENTS.md as the canonical orchestration contract.",
+        "skill": "Use skills/biomed-research/SKILL.md for source-backed synthesis.",
+        "routing_summary": [
+            "opentargets: target-disease evidence, drugs, genetics, variants, studies",
+            "monarch: HPO phenotypes, rare disease, model organisms, similarity",
+            "mygene: gene annotation, IDs, expression, GO, orthologs",
+            "mychem: chemical identifiers, structures, mechanisms, bioactivity",
+            "mydisease: disease annotation, OMIM, Orphanet, MONDO, HPO",
+        ],
+        "safety_boundary": (
+            "Research and educational use only; do not diagnose, prescribe, dose, "
+            "or recommend patient-specific treatment."
+        ),
+        "runtime_note": _runtime_note(runtime),
+    }
+
+
+def _runtime_note(runtime: str) -> str:
+    if runtime == "codex":
+        return "Add the MCP TOML snippet to your Codex MCP configuration."
+    if runtime == "claude":
+        return "Add the mcp_config JSON to Claude's MCP configuration."
+    return (
+        "Add the mcp_config JSON to Cursor MCP settings and paste the "
+        "cursor_agent_instructions text into Cursor rules or agent instructions."
+    )
+
+
+def _cursor_agent_instructions() -> str:
+    return (
+        "Use this workspace as an agent-native biomedical research environment. "
+        "Route factual biomedical questions through the configured MCP servers, "
+        "resolve names to stable IDs before deeper calls, attribute material "
+        "claims to tool observations, state limitations, and follow the safety "
+        "boundary: no diagnosis, prescribing, dosing, or patient-specific "
+        "treatment advice."
     )
 
 

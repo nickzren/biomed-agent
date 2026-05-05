@@ -1,6 +1,6 @@
 # Biomedical Agent Workspace
 
-Agent-facing biomedical research workspace for Codex and Claude Code.
+Agent-native biomedical research workspace for Claude Code and Codex, backed by MCP tools instead of app-owned LLM APIs.
 
 This repo no longer owns an LLM reasoning loop or Streamlit UI. Codex or Claude Code should call the five biomedical MCP servers directly, guided by [AGENTS.md](AGENTS.md) and [skills/biomed-research/SKILL.md](skills/biomed-research/SKILL.md).
 
@@ -53,14 +53,36 @@ Override paths with `OPENTARGETS_MCP_PATH`, `MONARCH_MCP_PATH`, `MYGENE_MCP_PATH
 uv sync
 ```
 
+## Install From Git
+
+```bash
+uvx --from git+https://github.com/nickzren/biomed-agent biomed-agent doctor
+```
+
+`doctor` needs the MCP repos at the expected sibling paths or matching `*_MCP_PATH` environment variables.
+
 ## Diagnostics
 
 ```bash
-uv run python -m biomed_agent.cli list-servers
-uv run python -m biomed_agent.cli list-tools
-uv run python -m biomed_agent.cli list-tools --server opentargets
-uv run python -m biomed_agent.cli call-tool opentargets.search_entities '{"query_string":"BRAF","entity_names":["target"]}'
-uv run python -m biomed_agent.cli doctor
+uv run biomed-agent list-servers
+uv run biomed-agent list-servers --json
+uv run biomed-agent list-tools
+uv run biomed-agent list-tools --json
+uv run biomed-agent list-tools --server opentargets
+uv run biomed-agent call-tool opentargets.search_entities '{"query_string":"BRAF","entity_names":["target"]}'
+uv run biomed-agent doctor
+uv run biomed-agent doctor --json
+```
+
+## Init Config
+
+`init` is print-only. It does not edit Codex, Claude Code, or Cursor settings.
+
+```bash
+uv run biomed-agent init --runtime codex --print
+uv run biomed-agent init --runtime claude --print
+uv run biomed-agent init --runtime cursor --print
+uv run biomed-agent init --runtime codex --print --mcp-base ../
 ```
 
 ## Tests
