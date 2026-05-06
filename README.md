@@ -61,6 +61,30 @@ uvx --from git+https://github.com/nickzren/biomed-agent biomed-agent doctor
 
 `doctor` needs the MCP repos at the expected sibling paths or matching `*_MCP_PATH` environment variables.
 
+## Install Agent Skill
+
+Copy this into a new Codex or Claude Code session:
+
+```text
+Set up biomed-research, the source-backed biomedical research skill for agents.
+
+If npm is available:
+npx skills add nickzren/biomed-agent --skill biomed-research -y -g
+
+Otherwise:
+dir="${XDG_DATA_HOME:-$HOME/.local/share}/agent-skills"
+repo="$dir/biomed-agent"
+mkdir -p "$dir"
+test -d "$repo" || gh repo clone nickzren/biomed-agent "$repo"
+"$repo/install.sh"
+```
+
+Manual install from this checkout:
+
+```bash
+./install.sh
+```
+
 ## Diagnostics
 
 ```bash
