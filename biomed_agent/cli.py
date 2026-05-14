@@ -1,7 +1,7 @@
 import asyncio
 import json
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import typer
 from rich.console import Console
@@ -16,6 +16,7 @@ from .servers import (
     resolve_server_path,
     selected_server_names,
     split_tool_id,
+    tool_matches_capability,
 )
 
 app = typer.Typer(help="Biomedical MCP workspace CLI")
@@ -41,16 +42,12 @@ def list_servers(
     table.add_column("Path", style="white", overflow="fold")
     table.add_column("Capabilities", style="yellow", overflow="fold")
 
-    for server_name, config in MCP_SERVERS.items():
-        path = resolve_server_path(server_name)
-        capabilities = ", ".join(config.capabilities[:5])
-        if len(config.capabilities) > 5:
-            capabilities += f" (+{len(config.capabilities) - 5} more)"
+    for server in build_list_servers_payload()["servers"]:
         table.add_row(
-            server_name,
-            "found" if path.exists() else "missing",
-            str(path),
-            capabilities,
+            server["name"],
+            server["status"],
+            server["path"],
+            _capability_preview(server["capabilities"]),
         )
 
     console.print(table)
@@ -58,10 +55,10 @@ def list_servers(
 
 @app.command("list-tools")
 def list_tools(
-    servers: Optional[list[str]] = typer.Option(
+    servers: list[str] | None = typer.Option(
         None, "--server", "-s", help="Specific server to connect to"
     ),
-    capability: Optional[str] = typer.Option(
+    capability: str | None = typer.Option(
         None, "--capability", "-c", help="Filter tools by capability"
     ),
     json_output: bool = typer.Option(
@@ -73,50 +70,46 @@ def list_tools(
 
 
 async def _list_tools(
-    servers: Optional[list[str]],
-    capability: Optional[str],
+    servers: list[str] | None,
+    capability: str | None,
     json_output: bool,
 ) -> None:
     if json_output:
         _print_json(await build_list_tools_payload(servers, capability))
         return
 
-    clients: list[MCPClient] = []
-    try:
-        registry = await _connect_and_register(servers, clients)
-        if capability:
-            matching_tools = find_tools_by_capability(registry, capability)
+    registry = await _connect_and_register(servers)
+    if capability:
+        matching_tools = find_tools_by_capability(registry, capability)
+        console.print(
+            f"\n[bold cyan]Tools matching '{capability}':[/bold cyan] "
+            f"({len(matching_tools)} found)"
+        )
+        for tool_id in matching_tools:
+            tool = registry[tool_id]["tool"]
             console.print(
-                f"\n[bold cyan]Tools matching '{capability}':[/bold cyan] "
-                f"({len(matching_tools)} found)"
+                f"  [yellow]{tool_id}[/yellow]: "
+                f"{tool.get('description', 'N/A')}"
             )
-            for tool_id in matching_tools:
-                tool = registry[tool_id]["tool"]
-                console.print(
-                    f"  [yellow]{tool_id}[/yellow]: "
-                    f"{tool.get('description', 'N/A')}"
-                )
-            return
+        return
 
-        grouped_tools = group_tools_by_server(registry)
-        total_tools = sum(len(items) for items in grouped_tools.values())
-        console.print(f"\n[bold]Total tools available: {total_tools}[/bold]")
+    grouped_tools = group_tools_by_server(registry)
+    total_tools = sum(len(items) for items in grouped_tools.values())
+    console.print(f"\n[bold]Total tools available: {total_tools}[/bold]")
 
-        for server_name, server_tools in grouped_tools.items():
-            console.print(f"\n[bold cyan]{server_name}[/bold cyan] ({len(server_tools)} tools)")
-            table = Table(show_header=False, box=None, padding=(0, 2))
-            table.add_column("Tool", style="yellow")
-            table.add_column("Description", style="white")
-            for tool in server_tools[:10]:
-                description = tool["description"]
-                if len(description) > 80:
-                    description = description[:77] + "..."
-                table.add_row(tool["id"], description)
-            console.print(table)
-            if len(server_tools) > 10:
-                console.print(f"  [dim]... and {len(server_tools) - 10} more tools[/dim]")
-    finally:
-        await _disconnect_all(clients)
+    for server_name, server_tools in grouped_tools.items():
+        console.print(f"\n[bold cyan]{server_name}[/bold cyan] ({len(server_tools)} tools)")
+        table = Table(show_header=False, box=None, padding=(0, 2))
+        table.add_column("Tool", style="yellow")
+        table.add_column("Description", style="white")
+        for tool in server_tools[:10]:
+            description = tool["description"]
+            if len(description) > 80:
+                description = description[:77] + "..."
+            table.add_row(tool["id"], description)
+        console.print(table)
+        if len(server_tools) > 10:
+            console.print(f"  [dim]... and {len(server_tools) - 10} more tools[/dim]")
 
 
 @app.command("call-tool")
@@ -152,7 +145,7 @@ async def _call_tool(tool_id: str, arguments: dict[str, Any]) -> None:
 
 @app.command("doctor")
 def doctor(
-    servers: Optional[list[str]] = typer.Option(
+    servers: list[str] | None = typer.Option(
         None, "--server", "-s", help="Specific server to check"
     ),
     json_output: bool = typer.Option(
@@ -163,7 +156,7 @@ def doctor(
     asyncio.run(_doctor(servers, json_output))
 
 
-async def _doctor(servers: Optional[list[str]], json_output: bool) -> None:
+async def _doctor(servers: list[str] | None, json_output: bool) -> None:
     if json_output:
         _print_json(await build_doctor_payload(servers))
         return
@@ -176,20 +169,16 @@ async def _doctor(servers: Optional[list[str]], json_output: bool) -> None:
     table.add_column("Tools", justify="right")
 
     for server_name in names:
-        server = build_server(server_name)
-        if not server.path.exists():
-            table.add_row(server_name, str(server.path), "missing", "0")
-            continue
-
-        client = MCPClient(server)
-        try:
-            await client.connect()
-            tools = await client.list_tools()
-            table.add_row(server_name, str(server.path), "ok", str(len(tools)))
-        except Exception as exc:
-            table.add_row(server_name, str(server.path), f"error: {exc}", "0")
-        finally:
-            await client.disconnect()
+        probe = await _probe_server_tools(server_name)
+        status = probe["status"]
+        if status == "error":
+            status = f"error: {probe['error']}"
+        table.add_row(
+            server_name,
+            str(probe["path"]),
+            status,
+            str(probe["tool_count"]),
+        )
 
     console.print(table)
 
@@ -221,28 +210,24 @@ def init(
 
 
 async def _connect_and_register(
-    servers: Optional[list[str]],
-    clients: list[MCPClient],
+    servers: list[str] | None,
 ) -> dict[str, dict[str, Any]]:
     registry: dict[str, dict[str, Any]] = {}
     for server_name in selected_server_names(servers):
-        server = build_server(server_name)
-        if not server.path.exists():
-            console.print(f"[yellow]Skipping missing server path:[/yellow] {server.path}")
+        probe = await _probe_server_tools(server_name)
+        if probe["status"] == "missing":
+            console.print(f"[yellow]Skipping missing server path:[/yellow] {probe['path']}")
             continue
+        if probe["status"] == "error":
+            raise RuntimeError(str(probe["error"]))
 
-        client = MCPClient(server)
-        await client.connect()
-        clients.append(client)
-
-        for tool in await client.list_tools():
+        for tool in probe["tools"]:
             tool_name = tool.get("name")
             if not tool_name:
                 continue
             registry[f"{server_name}.{tool_name}"] = {
                 "server": server_name,
                 "tool": tool,
-                "client": client,
             }
 
     if not registry:
@@ -250,15 +235,38 @@ async def _connect_and_register(
     return registry
 
 
-async def _disconnect_all(clients: list[MCPClient]) -> None:
-    await asyncio.gather(
-        *(client.disconnect() for client in clients),
-        return_exceptions=True,
-    )
+async def _probe_server_tools(server_name: str) -> dict[str, Any]:
+    server = build_server(server_name)
+    probe: dict[str, Any] = {
+        "name": server_name,
+        "path": str(server.path),
+        "status": "missing",
+        "tool_count": 0,
+        "tools": [],
+    }
+    if not server.path.exists():
+        return probe
+
+    client = MCPClient(server)
+    try:
+        await client.connect()
+        tools = await client.list_tools()
+        probe.update(
+            {
+                "status": "ok",
+                "tool_count": len(tools),
+                "tools": tools,
+            }
+        )
+    except Exception as exc:
+        probe.update({"status": "error", "error": str(exc)})
+    finally:
+        await client.disconnect()
+    return probe
 
 
 def _print_json(payload: dict[str, Any]) -> None:
-    console.print_json(json.dumps(payload, indent=2, default=str))
+    console.print_json(data=payload, default=str)
 
 
 def build_list_servers_payload() -> dict[str, Any]:
@@ -274,20 +282,28 @@ def build_list_servers_payload() -> dict[str, Any]:
 def _server_config_payload(server_name: str) -> dict[str, Any]:
     config = MCP_SERVERS[server_name]
     path = resolve_server_path(server_name)
+    exists = path.exists()
     return {
         "name": server_name,
         "description": config.description,
         "module": config.module,
         "path": str(path),
-        "exists": path.exists(),
-        "status": "found" if path.exists() else "missing",
+        "exists": exists,
+        "status": "found" if exists else "missing",
         "capabilities": list(config.capabilities),
     }
 
 
+def _capability_preview(capabilities: list[str]) -> str:
+    preview = ", ".join(capabilities[:5])
+    if len(capabilities) > 5:
+        preview += f" (+{len(capabilities) - 5} more)"
+    return preview
+
+
 async def build_list_tools_payload(
-    servers: Optional[list[str]],
-    capability: Optional[str],
+    servers: list[str] | None,
+    capability: str | None,
 ) -> dict[str, Any]:
     names = selected_server_names(servers)
     payload: dict[str, Any] = {
@@ -300,22 +316,21 @@ async def build_list_tools_payload(
         payload["tools"] = []
 
     for server_name in names:
-        server = build_server(server_name)
+        probe = await _probe_server_tools(server_name)
         server_payload: dict[str, Any] = {
             "name": server_name,
-            "path": str(server.path),
-            "status": "missing",
-            "tool_count": 0,
+            "path": probe["path"],
+            "status": probe["status"],
+            "tool_count": probe["tool_count"],
             "tools": [],
         }
-        if not server.path.exists():
+        if probe["status"] == "missing":
             payload["servers"].append(server_payload)
             continue
-
-        client = MCPClient(server)
-        try:
-            await client.connect()
-            tools = [_tool_payload(server_name, tool) for tool in await client.list_tools()]
+        if probe["status"] == "error":
+            server_payload["error"] = probe["error"]
+        else:
+            tools = [_tool_payload(server_name, tool) for tool in probe["tools"]]
             if capability:
                 tools = [
                     tool for tool in tools if _tool_matches_capability(tool, capability)
@@ -330,10 +345,6 @@ async def build_list_tools_payload(
             payload["total_tools"] += len(tools)
             if capability:
                 payload["tools"].extend(tools)
-        except Exception as exc:
-            server_payload.update({"status": "error", "error": str(exc)})
-        finally:
-            await client.disconnect()
         payload["servers"].append(server_payload)
 
     return payload
@@ -350,43 +361,28 @@ def _tool_payload(server_name: str, tool: dict[str, Any]) -> dict[str, Any]:
 
 
 def _tool_matches_capability(tool: dict[str, Any], capability: str) -> bool:
-    needle = capability.lower()
     server_name = str(tool["server"])
-    config = MCP_SERVERS[server_name]
-    haystack = " ".join(
-        [
-            str(tool.get("id", "")),
-            str(tool.get("name", "")),
-            str(tool.get("description", "")),
-            " ".join(config.capabilities),
-        ]
-    ).lower()
-    return needle in haystack
+    return tool_matches_capability(
+        tool_id=str(tool["id"]),
+        server_name=server_name,
+        tool=tool,
+        capability=capability,
+        include_tool_id=True,
+    )
 
 
-async def build_doctor_payload(servers: Optional[list[str]]) -> dict[str, Any]:
+async def build_doctor_payload(servers: list[str] | None) -> dict[str, Any]:
     server_payloads = []
     for server_name in selected_server_names(servers):
-        server = build_server(server_name)
+        probe = await _probe_server_tools(server_name)
         item: dict[str, Any] = {
             "name": server_name,
-            "path": str(server.path),
-            "status": "missing",
-            "tool_count": 0,
+            "path": probe["path"],
+            "status": probe["status"],
+            "tool_count": probe["tool_count"],
         }
-        if not server.path.exists():
-            server_payloads.append(item)
-            continue
-
-        client = MCPClient(server)
-        try:
-            await client.connect()
-            tools = await client.list_tools()
-            item.update({"status": "ok", "tool_count": len(tools)})
-        except Exception as exc:
-            item.update({"status": "error", "error": str(exc)})
-        finally:
-            await client.disconnect()
+        if probe["status"] == "error":
+            item["error"] = probe["error"]
         server_payloads.append(item)
 
     return {

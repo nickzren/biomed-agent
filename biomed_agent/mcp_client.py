@@ -1,83 +1,68 @@
 import asyncio
 import json
-import subprocess
-from typing import Any, Dict, List, Optional
-from dataclasses import dataclass
-from pathlib import Path
 import logging
+import subprocess
+from importlib.metadata import PackageNotFoundError, version
+from typing import Any, TextIO
+
+from .servers import MCPServer
 
 logger = logging.getLogger(__name__)
 
-@dataclass
-class MCPServer:
-    """Configuration for an MCP server."""
-    name: str
-    path: Path
-    command: List[str]
-    description: str
-    capabilities: List[str]
 
 class MCPClient:
     """Client for communicating with MCP servers via stdio."""
     
     def __init__(self, server: MCPServer):
         self.server = server
-        self.process: Optional[subprocess.Popen] = None
-        self._reader_task: Optional[asyncio.Task] = None
-        self._stderr_task: Optional[asyncio.Task] = None
-        self._response_futures: Dict[int, asyncio.Future] = {}
+        self.process: subprocess.Popen[str] | None = None
+        self._reader_task: asyncio.Task[None] | None = None
+        self._stderr_task: asyncio.Task[None] | None = None
+        self._response_futures: dict[int, asyncio.Future[dict[str, Any]]] = {}
         self._next_id = 1
-        self._tools: List[Dict[str, Any]] = []
+        self._tools: list[dict[str, Any]] = []
         
-    async def connect(self):
+    async def connect(self) -> None:
         """Start the MCP server process and establish communication."""
-        try:
-            self.process = subprocess.Popen(
-                self.server.command,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                cwd=str(self.server.path)
-            )
-            if not self.process.stdin or not self.process.stdout or not self.process.stderr:
-                raise RuntimeError(f"Failed to open stdio streams for {self.server.name}")
-            
-            # Start reader task
-            self._reader_task = asyncio.create_task(self._read_responses())
-            self._stderr_task = asyncio.create_task(self._read_stderr())
-            
-            # Step 1: Send initialize request
-            init_result = await self._send_request("initialize", {
+        self.process = subprocess.Popen(
+            self.server.command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=str(self.server.path),
+        )
+        if not self.process.stdin or not self.process.stdout or not self.process.stderr:
+            raise RuntimeError(f"Failed to open stdio streams for {self.server.name}")
+
+        self._reader_task = asyncio.create_task(self._read_responses())
+        self._stderr_task = asyncio.create_task(self._read_stderr())
+
+        init_result = await self._send_request(
+            "initialize",
+            {
                 "protocolVersion": "2024-11-05",
-                "capabilities": {
-                    "tools": {}
-                },
+                "capabilities": {"tools": {}},
                 "clientInfo": {
                     "name": "biomed-agent",
-                    "version": "0.1.0"
-                }
-            })
-            
-            logger.debug(f"Initialize response: {init_result}")
-            
-            # Step 2: Send initialized notification (no ID for notifications)
-            await self._send_notification("notifications/initialized")
-            
-            # Give server a moment to process the notification
-            await asyncio.sleep(0.1)
-            
-            # Step 3: List available tools
-            tools_response = await self._send_request("tools/list", {})
-            self._tools = tools_response.get("tools", [])
-            
-            logger.info(f"Connected to {self.server.name} with {len(self._tools)} tools")
-            
-        except Exception as e:
-            logger.error(f"Connection error: {e}")
-            raise
+                    "version": _package_version(),
+                },
+            },
+        )
+
+        logger.debug("Initialize response: %s", init_result)
+
+        await self._send_notification("notifications/initialized")
+
+        # Some stdio MCP servers need a tick after initialized before tools/list.
+        await asyncio.sleep(0.1)
+
+        tools_response = await self._send_request("tools/list", {})
+        self._tools = tools_response.get("tools", [])
+
+        logger.info("Connected to %s with %s tools", self.server.name, len(self._tools))
         
-    async def disconnect(self):
+    async def disconnect(self) -> None:
         """Disconnect from the MCP server."""
         if self._reader_task:
             self._reader_task.cancel()
@@ -89,6 +74,7 @@ class MCPClient:
         if self.process:
             try:
                 self.process.terminate()
+                # Allow graceful stdio shutdown before forcing termination.
                 await asyncio.sleep(0.1)
                 if self.process.poll() is None:
                     self.process.kill()
@@ -98,97 +84,94 @@ class MCPClient:
                     RuntimeError(f"MCP server {self.server.name} disconnected")
                 )
                 
-    async def list_tools(self) -> List[Dict[str, Any]]:
+    async def list_tools(self) -> list[dict[str, Any]]:
         """Return cached list of available tools."""
         return self._tools
         
-    async def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Any:
+    async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> Any:
         """Call a tool on the server."""
-        response = await self._send_request("tools/call", {
-            "name": tool_name,
-            "arguments": arguments
-        })
-        
-        # Extract content from response
+        response = await self._send_request(
+            "tools/call",
+            {
+                "name": tool_name,
+                "arguments": arguments,
+            },
+        )
+
         content = response.get("content", [])
-        if content and isinstance(content, list) and len(content) > 0:
-            # MCP tools return content as an array of content items
+        if isinstance(content, list) and content:
             first_content = content[0]
             if isinstance(first_content, dict) and "text" in first_content:
                 try:
-                    # Try to parse as JSON
                     return json.loads(first_content["text"])
                 except json.JSONDecodeError:
-                    # Return as is if not JSON
                     return first_content["text"]
         return content
         
-    async def _send_request(self, method: str, params: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    async def _send_request(
+        self,
+        method: str,
+        params: dict[str, Any] | None,
+    ) -> dict[str, Any]:
         """Send a JSON-RPC request to the server and wait for response."""
-        if not self.process or self.process.poll() is not None:
-            raise RuntimeError(f"MCP server {self.server.name} is not running")
-        if not self.process.stdin:
-            raise RuntimeError(f"MCP server {self.server.name} stdin is unavailable")
-
         request_id = self._next_id
         self._next_id += 1
-        
-        # Build request
+
         request = {
             "jsonrpc": "2.0",
             "id": request_id,
-            "method": method
+            "method": method,
         }
         
         # Always include params for requests (even if empty)
         if params is not None:
             request["params"] = params
-        
-        # Create future for response
+
         future = asyncio.get_running_loop().create_future()
         self._response_futures[request_id] = future
-        
-        # Send request
-        request_str = json.dumps(request) + "\n"
-        logger.debug(f"Sending request: {request_str.strip()}")
         try:
-            self.process.stdin.write(request_str)
-            self.process.stdin.flush()
+            self._write_jsonrpc_message("request", request)
         except Exception:
             self._response_futures.pop(request_id, None)
             raise
-        
-        # Wait for response with timeout
-        try:
-            result = await asyncio.wait_for(future, timeout=30.0)
-            return result
-        except asyncio.TimeoutError:
-            self._response_futures.pop(request_id, None)
-            raise Exception(f"Timeout waiting for response to {method}")
-            
-    async def _send_notification(self, method: str, params: Optional[Dict[str, Any]] = None):
-        """Send a JSON-RPC notification (no response expected)."""
-        if not self.process or self.process.poll() is not None:
-            raise RuntimeError(f"MCP server {self.server.name} is not running")
-        if not self.process.stdin:
-            raise RuntimeError(f"MCP server {self.server.name} stdin is unavailable")
 
-        # Build notification (no id field)
+        try:
+            return await asyncio.wait_for(future, timeout=30.0)
+        except TimeoutError as exc:
+            self._response_futures.pop(request_id, None)
+            raise TimeoutError(f"Timeout waiting for response to {method}") from exc
+            
+    async def _send_notification(
+        self,
+        method: str,
+        params: dict[str, Any] | None = None,
+    ) -> None:
+        """Send a JSON-RPC notification (no response expected)."""
         notification = {
             "jsonrpc": "2.0",
-            "method": method
+            "method": method,
         }
         
         if params is not None:
             notification["params"] = params
+
+        self._write_jsonrpc_message("notification", notification)
+
+    def _write_jsonrpc_message(self, label: str, message: dict[str, Any]) -> None:
+        stdin = self._require_stdin()
+        message_str = json.dumps(message) + "\n"
+        logger.debug("Sending %s: %s", label, message_str.strip())
+        stdin.write(message_str)
+        stdin.flush()
+
+    def _require_stdin(self) -> TextIO:
+        if not self.process or self.process.poll() is not None:
+            raise RuntimeError(f"MCP server {self.server.name} is not running")
+        if not self.process.stdin:
+            raise RuntimeError(f"MCP server {self.server.name} stdin is unavailable")
+        return self.process.stdin
         
-        # Send notification
-        notification_str = json.dumps(notification) + "\n"
-        logger.debug(f"Sending notification: {notification_str.strip()}")
-        self.process.stdin.write(notification_str)
-        self.process.stdin.flush()
-        
-    async def _read_responses(self):
+    async def _read_responses(self) -> None:
         """Read responses from the server stdout."""
         while True:
             try:
@@ -203,40 +186,47 @@ class MCPClient:
                 line = line.strip()
                 if not line:
                     continue
-                    
-                # Debug log raw output
-                logger.debug(f"Raw output from {self.server.name}: {line}")
-                
-                # Skip non-JSON lines
-                if not line.startswith('{'):
-                    continue
-                    
-                try:
-                    response = json.loads(line)
-                    logger.debug(f"Parsed response: {response}")
-                    
-                    # Only process responses with an ID (not notifications)
-                    request_id = response.get("id")
-                    if request_id is not None and request_id in self._response_futures:
-                        future = self._response_futures.pop(request_id)
-                        if "error" in response:
-                            future.set_exception(RuntimeError(str(response["error"])))
-                        else:
-                            future.set_result(response.get("result", {}))
-                except json.JSONDecodeError as e:
-                    logger.debug(f"Failed to parse JSON: {e} - Line: {line}")
+
+                response = self._parse_response_line(line)
+                if response is not None:
+                    self._dispatch_response(response)
                         
             except asyncio.CancelledError:
                 break
-            except Exception as e:
-                logger.error(f"Error reading response: {e}")
+            except Exception as exc:
+                logger.error("Error reading response: %s", exc)
                 break
 
         self._fail_pending_futures(
             RuntimeError(f"MCP server {self.server.name} closed before responding")
         )
 
-    async def _read_stderr(self):
+    def _parse_response_line(self, line: str) -> dict[str, Any] | None:
+        logger.debug("Raw output from %s: %s", self.server.name, line)
+        if not line.startswith('{'):
+            return None
+
+        try:
+            response = json.loads(line)
+        except json.JSONDecodeError as exc:
+            logger.debug("Failed to parse JSON: %s - Line: %s", exc, line)
+            return None
+
+        logger.debug("Parsed response: %s", response)
+        return response
+
+    def _dispatch_response(self, response: dict[str, Any]) -> None:
+        request_id = response.get("id")
+        if request_id is None or request_id not in self._response_futures:
+            return
+
+        future = self._response_futures.pop(request_id)
+        if "error" in response:
+            future.set_exception(RuntimeError(str(response["error"])))
+        else:
+            future.set_result(response.get("result", {}))
+
+    async def _read_stderr(self) -> None:
         """Read stderr from the server process and log it."""
         while True:
             try:
@@ -250,10 +240,16 @@ class MCPClient:
                 line = line.strip()
                 if line:
                     lowered = line.lower()
-                    if "virtual_env=" in lowered and "does not match the project environment path" in lowered:
+                    if (
+                        "virtual_env=" in lowered
+                        and "does not match the project environment path" in lowered
+                    ):
                         logger.debug("stderr from %s: %s", self.server.name, line)
                         continue
-                    if any(token in lowered for token in ("error", "exception", "traceback", "warning")):
+                    if any(
+                        token in lowered
+                        for token in ("error", "exception", "traceback", "warning")
+                    ):
                         logger.warning("stderr from %s: %s", self.server.name, line)
                     else:
                         logger.debug("stderr from %s: %s", self.server.name, line)
@@ -263,8 +259,15 @@ class MCPClient:
                 logger.error("Error reading stderr from %s: %s", self.server.name, e)
                 break
 
-    def _fail_pending_futures(self, error: Exception):
+    def _fail_pending_futures(self, error: Exception) -> None:
         for request_id, future in list(self._response_futures.items()):
             if not future.done():
                 future.set_exception(error)
             self._response_futures.pop(request_id, None)
+
+
+def _package_version() -> str:
+    try:
+        return version("biomed-agent")
+    except PackageNotFoundError:
+        return "0.0.0"

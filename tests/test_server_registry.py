@@ -7,6 +7,7 @@ from biomed_agent.servers import (
     group_tools_by_server,
     resolve_server_path,
     split_tool_id,
+    tool_matches_capability,
 )
 
 
@@ -18,6 +19,15 @@ def test_registry_tracks_expected_mcp_servers():
         "mydisease",
         "mygene",
     }
+
+
+def test_mcp_server_descriptor_reexports_stay_compatible():
+    from biomed_agent import MCPServer as package_mcp_server
+    from biomed_agent.mcp_client import MCPServer as client_mcp_server
+    from biomed_agent.servers import MCPServer as registry_mcp_server
+
+    assert package_mcp_server is registry_mcp_server
+    assert client_mcp_server is registry_mcp_server
 
 
 def test_resolve_server_path_uses_env_override(monkeypatch, tmp_path):
@@ -59,6 +69,35 @@ def test_find_tools_by_capability_checks_name_description_and_server_caps():
     assert find_tools_by_capability(registry, "annotation") == [
         "mygene.get_gene_annotation"
     ]
+
+
+def test_find_tools_by_capability_does_not_match_tool_id_text_only():
+    registry = {
+        "opentargets.entity_lookup": {
+            "server": "opentargets",
+            "tool": {"name": "entity_lookup", "description": "Entity lookup"},
+        },
+    }
+
+    assert find_tools_by_capability(registry, "opentargets") == []
+
+
+def test_tool_matches_capability_can_optionally_check_tool_id():
+    tool = {"name": "entity_lookup", "description": "Entity lookup"}
+
+    assert not tool_matches_capability(
+        tool_id="opentargets.entity_lookup",
+        server_name="opentargets",
+        tool=tool,
+        capability="opentargets",
+    )
+    assert tool_matches_capability(
+        tool_id="opentargets.entity_lookup",
+        server_name="opentargets",
+        tool=tool,
+        capability="opentargets",
+        include_tool_id=True,
+    )
 
 
 def test_group_tools_by_server_sorts_tool_ids():

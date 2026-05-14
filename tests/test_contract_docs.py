@@ -1,3 +1,4 @@
+import json
 import tomllib
 from pathlib import Path
 
@@ -43,9 +44,17 @@ def test_biomed_skill_preserves_research_contract():
 
 
 def test_mcp_config_lists_all_servers_with_stdio_commands():
-    text = (ROOT / "mcp.json").read_text()
+    config = json.loads((ROOT / "mcp.json").read_text())
+    servers = config["mcpServers"]
 
     for server in ["opentargets", "monarch", "mygene", "mychem", "mydisease"]:
-        assert f'"{server}"' in text
-        assert f"../{server}-mcp" in text
-        assert f"{server}_mcp.server" in text
+        assert server in servers
+        assert servers[server]["transport"] == "stdio"
+        assert servers[server]["command"] == "uv"
+        assert servers[server]["args"] == [
+            "run",
+            "python",
+            "-m",
+            f"{server}_mcp.server",
+        ]
+        assert servers[server]["cwd"] == f"../{server}-mcp"

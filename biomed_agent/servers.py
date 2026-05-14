@@ -5,9 +5,16 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-from .mcp_client import MCPServer
-
 load_dotenv()
+
+
+@dataclass
+class MCPServer:
+    name: str
+    path: Path
+    command: list[str]
+    description: str
+    capabilities: list[str]
 
 
 @dataclass(frozen=True)
@@ -207,21 +214,36 @@ def find_tools_by_capability(
     tools_registry: dict[str, dict[str, Any]],
     capability: str,
 ) -> list[str]:
-    capability_lower = capability.lower()
     matching_tools: set[str] = set()
 
     for tool_id, info in tools_registry.items():
-        tool = info["tool"]
-        tool_name = str(tool.get("name", "")).lower()
-        tool_description = str(tool.get("description", "")).lower()
-
-        if capability_lower in tool_name or capability_lower in tool_description:
-            matching_tools.add(tool_id)
-            continue
-
         server_name = str(info["server"])
-        server_capabilities = get_server_config(server_name).capabilities
-        if any(capability_lower in item.lower() for item in server_capabilities):
+        if tool_matches_capability(
+            tool_id=tool_id,
+            server_name=server_name,
+            tool=info["tool"],
+            capability=capability,
+        ):
             matching_tools.add(tool_id)
 
     return sorted(matching_tools)
+
+
+def tool_matches_capability(
+    *,
+    tool_id: str,
+    server_name: str,
+    tool: dict[str, Any],
+    capability: str,
+    include_tool_id: bool = False,
+) -> bool:
+    capability_lower = capability.lower()
+    haystack = [
+        str(tool.get("name", "")),
+        str(tool.get("description", "")),
+        " ".join(get_server_config(server_name).capabilities),
+    ]
+    if include_tool_id:
+        haystack.append(tool_id)
+
+    return capability_lower in " ".join(haystack).lower()
